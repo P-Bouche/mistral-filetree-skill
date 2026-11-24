@@ -2,7 +2,7 @@
 
 FILETREE.md : arborescence du projet avec une ligne informative par fichier et hash de fraîcheur (port de nekocode/mistral-filetree-skill-skill).
 
-Portage des skills de [mistral-filetree-skill-skill](https://github.com/nekocode/mistral-filetree-skill-skill) (archive de la branche `main`, 24 novembre 2026) vers le format Agent Skills utilisé par Vibe Code. 1 skills.
+Portage des skills de [filetree-skill](https://github.com/nekocode/filetree-skill) (archive de la branche `main`, 24 novembre 2026) vers le format Agent Skills utilisé par Vibe Code. 1 skills.
 
 ## Skills portées
 
