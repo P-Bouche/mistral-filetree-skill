@@ -1,0 +1,108 @@
+---
+description: Generate FILETREE.md from scratch. Confirms overwrite if it already exists. --self-only keeps every artifact out of git.
+argument-hint: "[--self-only]"
+allowed-tools: Read, Edit, Write, Bash(python3:*), Task, AskUserQuestion
+---
+
+Generate FILETREE.md from scratch for the current repository.
+
+**First**, read the shared rules at `${CLAUDE_PLUGIN_ROOT}/skills/filetree/SKILL.md` — it defines the summary style, **summary language**, UNCHANGED bias (not used here, but good to internalize for future `/filetree:update` calls), and parallelization strategy.
+
+Conduct this whole command — your own narration AND every summary — in the project's canonical language. Resolve it ONCE per SKILL.md "Summary language" (don't restate the chain here) — `config.language` from step 3's `todo` output wins when set. Its next source is `CLAUDE.md` / `AGENTS.md`: step 2 opens them only on the wire path — reuse that content if it did, else read now.
+
+The manifest path is configurable via `.filetree.json`. The script is the only config parser: take `manifest_path` from the `wire-target` / `todo` output below and use it everywhere this doc says "the manifest" — never assume `FILETREE.md`, never re-parse `.filetree.json` yourself.
+
+**Self-only mode** (`--self-only` in `$ARGUMENTS`): every filetree artifact stays out of git via `.git/info/exclude` — nothing to commit, teammates never see it. Wiring then targets the git-excluded `CLAUDE.local.md` INSTEAD of the team's `CLAUDE.md` / `AGENTS.md`, which are never edited in this mode. Reversal: `/filetree:uninstall`.
+
+## Steps
+
+1. **Offer config, resolve targets, check existing.** Config comes first because it decides where the manifest goes and what gets indexed — it must be settled before anything is built.
+
+   a. **Create the config, then confirm.** If `.filetree.json` does NOT exist, `Write` the default template below (it equals current defaults, so it changes nothing yet). Then use `AskUserQuestion` to ask whether to keep it. **That open prompt is the user's edit window** — while it waits, they can edit the file now on disk (relocate the manifest, add `exclude` / `include`, pin a `language`), and `wire-target` / `todo` below will pick up whatever they save. On **keep**, proceed. On **discard**, delete the file you just created (`python3 -c "import os; os.remove('.filetree.json')"`) and proceed with defaults. If `.filetree.json` ALREADY exists, do nothing here — never create, edit, or remove a pre-existing one (it's the user's, and may already be customized).
+      ```json
+      {
+        "manifest_path": "FILETREE.md",
+        "exclude": [],
+        "include": [],
+        "language": null,
+        "commit_guard": true,
+        "self_only": false
+      }
+      ```
+
+   b. **Self-only enable — only when `--self-only` was passed.** Run it BEFORE `wire-target` so the next step resolves the right wire target:
+      ```bash
+      python3 "${CLAUDE_PLUGIN_ROOT}/skills/filetree/scripts/filetree_selfonly.py" enable
+      ```
+      Idempotent (re-runs only repair missing exclude lines). On exit 1 an artifact is already git-tracked — surface the script's message verbatim and STOP; the user must untrack first.
+
+   c. Then run `wire-target` — it returns the configured `manifest_path`, `manifest_exists`, `self_only`, and per wire file `{exists, is_symlink, real_path, wired, matches}` (normal mode: `CLAUDE.md` / `AGENTS.md`; self-only mode: `CLAUDE.local.md` only):
+      ```bash
+      python3 "${CLAUDE_PLUGIN_ROOT}/skills/filetree/scripts/filetree.py" wire-target
+      ```
+      If the output shows `self_only: true` but you did NOT just run 1.b (a prior self-only install), run the 1.b enable now — idempotent repair; this `wire-target` output stays valid.
+      If `manifest_exists` is `true`, ask the user to confirm overwrite (they likely meant `/filetree:update`); on decline, stop — do not enter step 2. Skip the prompt when `false`.
+
+2. **Wire `CLAUDE.md` / `AGENTS.md`.** Do this **before** `todo` so the manifest captures the post-wire hash; otherwise the first `/filetree:lint` flags the wired file as drifted. Reuse the `wire-target` output from step 1 (these files are often symlinks → editing the link path fails, so always edit `real_path`). Then per file:
+
+   **Self-only mode** (`self_only: true` in the `wire-target` output): the only wire file is `CLAUDE.local.md` — already git-excluded, auto-loaded by Claude Code. Same sub-steps, ONE exception: on `exists: false` do NOT skip — propose CREATING `CLAUDE.local.md` containing just the 2.c section (confirm via `AskUserQuestion`, then `Write`). Never touch `CLAUDE.md` / `AGENTS.md` in this mode.
+
+   a. **`exists: false`** → skip; do not create. (Self-only mode: create instead — see above.)
+   b. **Already wired.** Skip when `wired` is `true` — the script found a `## <manifest>` heading, so the section is present however the body was reworded. Otherwise → 2.c. (`matches` is just the raw mention lines, for the 2.d edit preview; don't re-derive the wired decision from it.)
+   c. **Otherwise append a dedicated section to `real_path`** (NEVER the link name — Edit refuses to write through a symlink). Read `real_path` in full, then append the template below as a new top-level `##` section at the END (never merged into an existing `## References` / `## 引用`). Before writing: (1) replace every `FILETREE.md` with the configured `manifest_path` — including the `## ` heading, which MUST keep the bare path verbatim (that exact heading is what 2.b's `wired` check re-detects on the next run); (2) render all prose AND the example summaries in the canonical language resolved above, keeping the fenced block's structure.
+
+      `````markdown
+      ## FILETREE.md
+
+      `FILETREE.md` indexes every file with a one-line role summary, grouped by
+      directory. Read it to find code by purpose before `ls`/`grep`/`find` — it
+      turns "search the repo" into "look it up". Auto-maintained; don't hand-edit.
+
+      ```
+      ## (root)/
+
+      - `manage.py`: Django CLI entrypoint
+
+      ## src/auth/
+
+      - `jwt.py`: JWT middleware; parses token, injects user_id
+      - `session.py`: Redis-backed server-side session store
+      ```
+      `````
+   d. **Confirm via `AskUserQuestion`** before writing. Put the old → new diff in the `question` body or a `preview`. On decline, skip — do not retry. `Edit` `real_path` (use `Write` only on a zero-byte file).
+
+   Record per-file outcome (wired / absent / already-wired / declined) now — sub-agents in step 4 can evict step-2 context. If step 3 or 5 later crashes, the wire section stays on disk; re-running `/filetree:init` is idempotent (step 2.b's `wired` will be `true` and skip).
+
+3. **Generate work plan.** One call; the script chunks and writes the work to files (you never count or split):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/filetree/scripts/filetree.py" todo --split
+   ```
+   With no existing manifest, every tracked file is new work, written into the `batches` files (the full `added` / `changed` lists are omitted from `--split` stdout — drive off `batches`). The output also carries the `config` block (`manifest_path`, `language`) — use `config.language` for the canonical language if set. A wired `CLAUDE.md` / `AGENTS.md` shows up with its post-wire hash. (A gitignored one won't appear — wiring still works on disk, but the manifest only tracks files git sees. `exclude`/`include` from `.filetree.json` are already applied.)
+
+4. **Write summaries.** Process the batches per SKILL.md "Processing the work plan" (0 → skip to apply; otherwise spawn one `claude-haiku-4-5` sub-agent per batch — **every batch, including a lone one**; the main session itself never `Read`s a file or writes a summary). For each item a sub-agent Reads the file and writes a one-line summary per the SKILL.md style guide; items with a `symlink_target` field are NOT Read — write `symlink → <target>`.
+
+   This is a from-scratch generation: there is no prior summary, so **every file needs a real summary**. `UNCHANGED` is never valid here — that sentinel belongs to `/filetree:update` and would be silently dropped by `apply` (init starts from an empty manifest, nothing to refresh).
+
+   Every sub-agent prompt MUST:
+   - Tell them to first `Read ${CLAUDE_PLUGIN_ROOT}/skills/filetree/SKILL.md` for the summary **style** and part-file shape, then Read their assigned `batch_NN.json` and write `<split_dir>/part_NN.json` — the "UNCHANGED bias" section there is `/filetree:update` scoped and does NOT apply to init.
+   - **State the canonical language explicitly: "Write all summaries in <language>."** Fill in the language you resolved above — sub-agents must not re-detect it, or parallel batches diverge and the manifest mixes languages.
+   - State explicitly: **never output `UNCHANGED`. For every NON-symlink file write a real summary judged by its actual content** (including auto-generated files). For items with a `symlink_target` field, do NOT Read — write `symlink → <target>`.
+
+5. **Apply** all parts in one call (shell expands the glob; the script merges and computes hashes from disk):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/filetree/scripts/filetree.py" apply <split_dir>/part_*.json
+   ```
+   Part files carry only `{"updates": [{"path", "summary"}]}`. (An empty repo yields 0 batches — there are no part files to glob; pipe `{"updates": []}` via stdin instead.)
+
+6. **Verify coverage, then report.** The completion gate is `missing_from_manifest` being empty (an indexable file with no entry — a sub-agent dropped it). If it's non-empty, spawn one more `claude-haiku-4-5` sub-agent — give it the `split_dir`, the exact paths, and a non-colliding output name `part_fixup_NN.json` (NN incrementing) — to summarize those files (no `UNCHANGED`), then re-run `apply <split_dir>/part_*.json` (the glob catches the fixup; it merges) until it clears — keep this fixup off the main session. `skipped_unchanged_new` / `skipped_missing_path` flag bad summaries (a wrong `UNCHANGED`, or a hallucinated path) — fix and re-apply those. Ignore `skipped_excluded` (real files the config keeps out — nothing to fix; do NOT loop on `applied == received`, which these legitimately hold below). Then report: total files indexed, files skipped (binary / lock / excluded), wired files (and skipped with reason: absent / already-wired / declined), time taken. In self-only mode also report the paths hidden from git (1.b's `excluded_paths`) and that `/filetree:uninstall` reverses it.
+
+## Do not
+
+- Commit. User reviews the manifest and commits manually.
+- Touch a pre-existing `.filetree.json` — create (and offer to discard) the scaffold only when none exists.
+- Write summaries for files in `should_skip` — the script already filters them.
+- Create `CLAUDE.md` or `AGENTS.md` if neither exists — that's the user's call. (Creating `CLAUDE.local.md` in self-only mode is the designed exception.)
+- Edit `CLAUDE.md` / `AGENTS.md` in self-only mode — wiring goes to `CLAUDE.local.md` only.
+- Proceed to step 2 if the user declined the overwrite in step 1.
+- Wire the same file twice or retry a declined proposal.
+- Run `todo` before wiring; that would lock the pre-wire hash into the manifest and the next lint would flag phantom drift.

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mistral-filetree-skill",
+  "version": "1.0.0",
+  "description": "FILETREE.md : arborescence du projet avec une ligne informative par fichier et hash de fraîcheur (port de nekocode/filetree-skill)."
+}
